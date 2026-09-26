@@ -68,9 +68,7 @@ async function run() {
 
     app.get("/senior", async (req, res) => {
       try {
-        const result = await seniorCollection
-          .find({})
-          .toArray();
+        const result = await seniorCollection.find({}).toArray();
 
         res.status(200).json(result);
       } catch (error) {
@@ -89,9 +87,7 @@ async function run() {
       try {
         const senior = req.body;
 
-        const result = await seniorCollection.insertOne(
-          senior
-        );
+        const result = await seniorCollection.insertOne(senior);
 
         res.status(201).json({
           message: "Senior added successfully",
@@ -197,6 +193,36 @@ async function run() {
       }
     });
 
+
+
+
+    //admi assign
+    app.get("/users/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+
+        const user = await userCollection.findOne({
+          email: email,
+        });
+
+        if (!user) {
+          return res.status(404).json({
+            message: "User not found",
+          });
+        }
+
+        res.status(200).json(user);
+      } catch (error) {
+        res.status(500).json({
+          message: "Failed to get user",
+          error: error.message,
+        });
+      }
+    });
+
+
+    
+
     // =====================================================
     // REVIEWS
     // =====================================================
@@ -233,9 +259,7 @@ async function run() {
           });
         }
 
-        const result = await reviewCollection.insertOne(
-          review
-        );
+        const result = await reviewCollection.insertOne(review);
 
         res.status(201).json({
           message: "Review added successfully",
@@ -256,15 +280,10 @@ async function run() {
     // =====================================================
 
     app.listen(port, () => {
-      console.log(
-        `Server running on http://localhost:${port}`
-      );
+      console.log(`Server running on http://localhost:${port}`);
     });
   } catch (error) {
-    console.error(
-      "MongoDB connection failed:",
-      error
-    );
+    console.error("MongoDB connection failed:", error);
   }
 }
 
