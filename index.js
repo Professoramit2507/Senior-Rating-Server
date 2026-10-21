@@ -2,7 +2,7 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -108,7 +108,6 @@ async function run() {
     // =====================================================
 
     // GET ALL USERS
-
     app.get("/users", async (req, res) => {
       try {
         const result = await userCollection
@@ -127,7 +126,33 @@ async function run() {
       }
     });
 
-    // GET SINGLE USER BY EMAIL
+    // GET SINGLE USER (supports both /user?email=... and /users/:email)
+    app.get("/user", async (req, res) => {
+      try {
+        const email = req.query.email;
+        if (!email) {
+          return res.status(400).json({
+            message: "Email query parameter is required",
+          });
+        }
+
+        const user = await userCollection.findOne({ email });
+
+        if (!user) {
+          return res.status(404).json({
+            message: "User not found",
+          });
+        }
+
+        res.status(200).json(user);
+      } catch (error) {
+        console.error("GET USER ERROR:", error);
+        res.status(500).json({
+          message: "Failed to get user",
+          error: error.message,
+        });
+      }
+    });
 
     app.get("/users/:email", async (req, res) => {
       try {
@@ -154,8 +179,7 @@ async function run() {
       }
     });
 
-    // POST USER
-
+    // POST USER (New registrations default to status: "pending")
     app.post("/users", async (req, res) => {
       try {
         const user = req.body;
@@ -177,11 +201,22 @@ async function run() {
           });
         }
 
+        // By default, regular users are pending admin approval
+        // Admins automatically get approved
+        if (!user.status) {
+          user.status = user.role === "admin" ? "approved" : "pending";
+        }
+
+        if (!user.createdAt) {
+          user.createdAt = new Date().toISOString();
+        }
+
         const result = await userCollection.insertOne(user);
 
         res.status(201).json({
-          message: "User added successfully",
+          message: "User registered successfully",
           insertedId: result.insertedId,
+          status: user.status,
         });
       } catch (error) {
         console.error("POST USER ERROR:", error);
@@ -193,28 +228,71 @@ async function run() {
       }
     });
 
-
-
-
-    //admi assign
-    app.get("/users/:email", async (req, res) => {
+    // UPDATE USER STATUS / ROLE (Admin Permission)
+    app.patch("/users/:id", async (req, res) => {
       try {
-        const email = req.params.email;
+        const id = req.params.id;
+        const { status, role } = req.body;
 
-        const user = await userCollection.findOne({
-          email: email,
-        });
-
-        if (!user) {
-          return res.status(404).json({
-            message: "User not found",
-          });
+        let query = {};
+        if (ObjectId.isValid(id) && String(new ObjectId(id)) === id) {
+          query = { $or: [{ _id: new ObjectId(id) }, { _id: id }] };
+        } else {
+          query = { _id: id };
         }
 
-        res.status(200).json(user);
+        const updateFields = {};
+        if (status !== undefined) updateFields.status = status;
+        if (role !== undefined) updateFields.role = role;
+        updateFields.updatedAt = new Date().toISOString();
+
+        const result = await userCollection.updateOne(query, {
+          $set: updateFields,
+        });
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        res.status(200).json({
+          message: "User updated successfully",
+          modifiedCount: result.modifiedCount,
+        });
       } catch (error) {
+        console.error("UPDATE USER ERROR:", error);
         res.status(500).json({
-          message: "Failed to get user",
+          message: "Failed to update user",
+          error: error.message,
+        });
+      }
+    });
+
+    // DELETE USER
+    app.delete("/users/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        let query = {};
+        if (ObjectId.isValid(id) && String(new ObjectId(id)) === id) {
+          query = { $or: [{ _id: new ObjectId(id) }, { _id: id }] };
+        } else {
+          query = { _id: id };
+        }
+
+        const result = await userCollection.deleteOne(query);
+
+        if (result.deletedCount === 0) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        res.status(200).json({
+          message: "User deleted successfully",
+          deletedCount: result.deletedCount,
+        });
+      } catch (error) {
+        console.error("DELETE USER ERROR:", error);
+        res.status(500).json({
+          message: "Failed to delete user",
           error: error.message,
         });
       }
@@ -227,12 +305,20 @@ async function run() {
     // REVIEWS
     // =====================================================
 
-    // GET ALL REVIEWS
-
+    // GET REVIEWS (supports optional ?email=... and ?seniorId=...)
     app.get("/reviews", async (req, res) => {
       try {
+        const { email, seniorId } = req.query;
+        let query = {};
+        if (email) {
+          query.userEmail = email;
+        }
+        if (seniorId) {
+          query.seniorId = seniorId;
+        }
+
         const result = await reviewCollection
-          .find({})
+          .find(query)
           .sort({ _id: -1 })
           .toArray();
 
@@ -248,7 +334,6 @@ async function run() {
     });
 
     // POST REVIEW
-
     app.post("/reviews", async (req, res) => {
       try {
         const review = req.body;
@@ -259,7 +344,55 @@ async function run() {
           });
         }
 
+        if (!review.createdAt) {
+          review.createdAt = new Date();
+        }
+
         const result = await reviewCollection.insertOne(review);
+
+        // Update senior's average rating & total review count
+        try {
+          const allSeniorReviews = await reviewCollection
+            .find({ seniorId: String(review.seniorId) })
+            .toArray();
+
+          const totalReviewsCount = allSeniorReviews.length;
+          const avgRating =
+            totalReviewsCount > 0
+              ? Number(
+                  (
+                    allSeniorReviews.reduce(
+                      (sum, r) => sum + Number(r.rating || 0),
+                      0
+                    ) / totalReviewsCount
+                  ).toFixed(1)
+                )
+              : 0;
+
+          let seniorQuery = {};
+          if (
+            ObjectId.isValid(review.seniorId) &&
+            String(new ObjectId(review.seniorId)) === String(review.seniorId)
+          ) {
+            seniorQuery = {
+              $or: [
+                { _id: new ObjectId(review.seniorId) },
+                { _id: String(review.seniorId) },
+              ],
+            };
+          } else {
+            seniorQuery = { _id: String(review.seniorId) };
+          }
+
+          await seniorCollection.updateOne(seniorQuery, {
+            $set: {
+              rating: avgRating,
+              reviews: totalReviewsCount,
+            },
+          });
+        } catch (updateErr) {
+          console.error("Error updating senior rating stats:", updateErr);
+        }
 
         res.status(201).json({
           message: "Review added successfully",
@@ -270,6 +403,77 @@ async function run() {
 
         res.status(500).json({
           message: "Failed to add review",
+          error: error.message,
+        });
+      }
+    });
+
+    // DELETE REVIEW
+    app.delete("/reviews/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        let query = {};
+        if (ObjectId.isValid(id) && String(new ObjectId(id)) === id) {
+          query = {
+            $or: [{ _id: new ObjectId(id) }, { _id: id }],
+          };
+        } else {
+          query = { _id: id };
+        }
+
+        const existingReview = await reviewCollection.findOne(query);
+        const result = await reviewCollection.deleteOne(query);
+
+        if (existingReview?.seniorId) {
+          const allSeniorReviews = await reviewCollection
+            .find({ seniorId: String(existingReview.seniorId) })
+            .toArray();
+
+          const totalReviewsCount = allSeniorReviews.length;
+          const avgRating =
+            totalReviewsCount > 0
+              ? Number(
+                  (
+                    allSeniorReviews.reduce(
+                      (sum, r) => sum + Number(r.rating || 0),
+                      0
+                    ) / totalReviewsCount
+                  ).toFixed(1)
+                )
+              : 0;
+
+          let seniorQuery = {};
+          if (
+            ObjectId.isValid(existingReview.seniorId) &&
+            String(new ObjectId(existingReview.seniorId)) ===
+              String(existingReview.seniorId)
+          ) {
+            seniorQuery = {
+              $or: [
+                { _id: new ObjectId(existingReview.seniorId) },
+                { _id: String(existingReview.seniorId) },
+              ],
+            };
+          } else {
+            seniorQuery = { _id: String(existingReview.seniorId) };
+          }
+
+          await seniorCollection.updateOne(seniorQuery, {
+            $set: {
+              rating: avgRating,
+              reviews: totalReviewsCount,
+            },
+          });
+        }
+
+        res.status(200).json({
+          message: "Review deleted successfully",
+          deletedCount: result.deletedCount,
+        });
+      } catch (error) {
+        console.error("DELETE REVIEW ERROR:", error);
+        res.status(500).json({
+          message: "Failed to delete review",
           error: error.message,
         });
       }
